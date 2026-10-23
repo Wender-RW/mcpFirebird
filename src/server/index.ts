@@ -2,6 +2,7 @@
 import { McpServer, type GetPromptResult, type McpRequestContext } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { setupDatabaseTools } from '../tools/database.js';
+import { setupConnectionTools } from '../tools/connections.js';
 import { setupMetadataTools } from '../tools/metadata.js';
 import { setupSimpleTools } from '../tools/simple.js';
 import { setupDatabasePrompts } from '../prompts/database.js';
@@ -11,7 +12,8 @@ import { setupAdvancedTemplatePrompts } from '../prompts/advanced-templates.js';
 import { registerDatabaseResources } from '../resources/database.js';
 import { setupEventResources, closeEventManager } from '../resources/events.js';
 import { initSecurity } from '../security/index.js';
-import { closePool } from '../db/connection.js';
+import { closePool, getDefaultConfig } from '../db/connection.js';
+import { DatabaseRegistry } from '../db/database-registry.js';
 import { createLogger } from '../utils/logger.js';
 import { createHttpApplication } from './http-server.js';
 import { loadHttpSecurityConfig } from './http-security.js';
@@ -19,11 +21,20 @@ import pkg from '../../package.json' with { type: 'json' };
 
 const logger = createLogger('server');
 
-export async function createMcpServerInstance(context?: McpRequestContext): Promise<McpServer> {
+/**
+ * Builds one server instance. The tools that connect other databases exist only for
+ * the stdio transport, where one process serves one client; with any other `transport`
+ * the server offers only the configured database.
+ */
+export async function createMcpServerInstance(context?: McpRequestContext, transport?: string): Promise<McpServer> {
     const server = new McpServer({ name: pkg.name, version: pkg.version });
     const catalogNames = new Set<string>();
-    const databaseTools = setupDatabaseTools();
-    const tools = new Map([...databaseTools, ...setupMetadataTools(databaseTools, () => [...catalogNames]), ...setupSimpleTools()]);
+    const registry = new DatabaseRegistry(getDefaultConfig);
+    const databaseTools = new Map([
+        ...setupDatabaseTools(registry),
+        ...(transport === 'stdio' ? setupConnectionTools(registry) : [])
+    ]);
+    const tools = new Map([...databaseTools, ...setupMetadataTools(databaseTools, () => [...catalogNames], registry), ...setupSimpleTools()]);
     for (const [name, tool] of tools) {
         server.registerTool(name, {
             title: tool.title || name,
@@ -60,7 +71,7 @@ export async function main(): Promise<void> {
     const transport = (process.env.TRANSPORT_TYPE || 'stdio').toLowerCase();
     let close: () => Promise<void>;
     if (transport === 'stdio') {
-        const handle = serveStdio(createMcpServerInstance, { onerror: error => logger.error(error.message) });
+        const handle = serveStdio(context => createMcpServerInstance(context, 'stdio'), { onerror: error => logger.error(error.message) });
         close = () => handle.close();
     } else if (['http', 'sse', 'unified'].includes(transport)) {
         const config = loadHttpSecurityConfig();

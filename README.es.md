@@ -193,6 +193,30 @@ La herramienta **get-field-descriptions** es especialmente útil para los modelo
 
 Las herramientas de análisis de rendimiento (**analyze-query-performance**, **get-execution-plan** y **analyze-missing-indexes**) ayudan a optimizar las consultas de base de datos proporcionando información sobre el tiempo de ejecución, los planes de ejecución y las recomendaciones de índices.
 
+### Varias bases de datos en la misma conversación (solo stdio)
+
+Con el transporte `stdio`, el modelo puede abrir otras bases de datos del mismo servidor Firebird durante la conversación, sin reiniciar el servidor. Tres herramientas gestionan las conexiones:
+
+- **connect-database**: recibe `path` y un `alias` opcional, prueba la conexión y devuelve el alias que debe usarse.
+- **list-databases**: devuelve la base de datos predeterminada y las conectadas, cada una con su alias y su ruta. Nunca devuelve credenciales.
+- **disconnect-database**: recibe `alias` y cierra las conexiones de esa base de datos. La base `default` no se puede desconectar.
+
+Todas las herramientas que consultan una base de datos aceptan un argumento opcional `database` con un alias. Sin él, o con `default`, la herramienta usa la base configurada al iniciar el servidor.
+
+```json
+{ "path": "D:\\clientes\\c42\\erp.fdb" }
+```
+
+**connect-database** responde `{ "alias": "erp", "path": "D:\\clientes\\c42\\erp.fdb", "alreadyConnected": false }`. Las llamadas siguientes indican el alias:
+
+```json
+{ "tableName": "EMPLOYEES", "database": "erp" }
+```
+
+El host, el puerto, el usuario, la contraseña, el rol y el cifrado de red salen siempre de la configuración del servidor. La ruta debe ser absoluta (`D:\datos\app.fdb`, `D:/datos/app.fdb` o `/datos/app.fdb`). Se rechazan los prefijos de host, las rutas UNC, los protocolos como `inet://`, las rutas relativas y los alias de `databases.conf`. Los recursos, los prompts y los eventos siguen usando solo la base predeterminada. Con `http`, `sse` o `unified` las tres herramientas de conexión no están disponibles y `database` acepta solo `default`.
+
+**Riesgo:** el modelo puede conectar cualquier base de datos que la credencial del servidor consiga abrir en ese servidor Firebird. Configure `DatabaseAccess = Restrict <lista de carpetas>` en `firebird.conf`, ejecute el servidor con un usuario de Firebird que no sea `SYSDBA` y mantenga la aprobación de herramientas activada en el cliente para `connect-database`. Todas las reglas están en [docs/configuration.md](docs/configuration.md#connecting-more-than-one-database).
+
 ## Prompts disponibles
 
 1. **query-data**: Consulta datos usando lenguaje natural

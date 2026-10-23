@@ -12,23 +12,23 @@ export * from './wrapped-queries.js';
 export {
     DEFAULT_CONFIG,
     getGlobalConfig,
+    getDefaultConfig,
     connectToDatabase,
-    queryDatabase
+    queryDatabase,
+    testConnection,
+    closeDatabasePool
 } from './connection.js';
 
 export type { ConfigOptions } from './connection.js';
 
 export {
-    getDatabases,
     getViews,
     getProcedures,
-    DATABASE_DIR,
     executeBatchQueries,
     describeBatchTables
 } from './queries.js';
 
 export type {
-    DatabaseInfo,
     TableInfo,
     FieldInfo,
     ColumnInfo,

@@ -474,7 +474,7 @@ function getTriggerTypeDescription(triggerType: number): string {
 /**
  * Lista los eventos disponibles en los triggers y procedimientos (aquellos que usan POST_EVENT)
  */
-export async function listAvailableEvents(): Promise<{ name: string, type: string }[]> {
+export async function listAvailableEvents(config?: ConfigOptions): Promise<{ name: string, type: string }[]> {
     logger.debug('Retrieving available POST_EVENTs');
     
     const query = `
@@ -488,7 +488,7 @@ export async function listAvailableEvents(): Promise<{ name: string, type: strin
     `;
     
     try {
-        const results = await executeQuery(query) as { NAME: string, TYPE: string }[];
+        const results = await executeQuery(query, [], config) as { NAME: string, TYPE: string }[];
         return results.filter(row => visible(row.NAME)).map(row => ({
             name: row.NAME,
             type: row.TYPE

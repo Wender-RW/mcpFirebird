@@ -12,7 +12,8 @@ import {
     describeBatchTables,
     getTableIndexes,
     getTableConstraints,
-    getTableTriggers
+    getTableTriggers,
+    getDefaultConfig
 } from '../db/index.js';
 
 
@@ -21,46 +22,54 @@ import { checkAllowedOperation, checkAllowedTable } from '../security/authorizat
 import { prepareUserQuery } from '../security/sqlPolicy.js';
 import { createLogger } from '../utils/logger.js';
 import { wrapError } from '../utils/jsonHelper.js';
-import { finalizeTools, toolResult, toolError, type ToolDraft, type ToolDefinition } from './contracts.js';
+import { finalizeTools, toolResult, toolError, databaseArg, type ToolDraft, type ToolDefinition } from './contracts.js';
 import { databaseResultSchemas, userSqlTools } from './outputSchemas.js';
 export type { ToolDefinition } from './contracts.js';
 import { FirebirdError } from '../utils/errors.js';
+import { DatabaseRegistry } from '../db/database-registry.js';
 
 const logger = createLogger('tools:database');
 
 // Define and export Zod schemas at the module's top level
 export const ExecuteQueryArgsSchema = z.object({
     sql: z.string().min(1).describe("SQL query to execute (Firebird uses FIRST/ROWS for pagination instead of LIMIT)"),
-    params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Parameters for parameterized queries to prevent SQL injection")
+    params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Parameters for parameterized queries to prevent SQL injection"),
+    database: databaseArg
 });
 
 export const AnalyzeQueryPerformanceArgsSchema = z.object({
     sql: z.string().min(1).describe("SQL query to analyze"),
     params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Parameters for parameterized queries"),
-    iterations: z.number().int().positive().default(3).describe("Number of times to run the query for averaging performance")
+    iterations: z.number().int().positive().default(3).describe("Number of times to run the query for averaging performance"),
+    database: databaseArg
 });
 
 export const GetExecutionPlanArgsSchema = z.object({
     sql: z.string().min(1).describe("Authorized SELECT-first statement to prepare, not execute; WITH/CTE and writes are not supported"),
-    params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Retained for compatibility/auditing; values are not bound for prepare-only plans")
+    params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Retained for compatibility/auditing; values are not bound for prepare-only plans"),
+    database: databaseArg
 });
 
 export const AnalyzeMissingIndexesArgsSchema = z.object({
-    sql: z.string().min(1).describe("SQL query to analyze for missing indexes")
+    sql: z.string().min(1).describe("SQL query to analyze for missing indexes"),
+    database: databaseArg
 });
 
-export const ListTablesArgsSchema = z.object({}); // No arguments
+export const ListTablesArgsSchema = z.object({ database: databaseArg });
 
 export const DescribeTableArgsSchema = z.object({
-    tableName: z.string().min(1).describe("Name of the table to describe")
+    tableName: z.string().min(1).describe("Name of the table to describe"),
+    database: databaseArg
 });
 
 export const GetFieldDescriptionsArgsSchema = z.object({
-    tableName: z.string().min(1).describe("Name of the table to get field descriptions for")
+    tableName: z.string().min(1).describe("Name of the table to get field descriptions for"),
+    database: databaseArg
 });
 
 export const TableMetadataArgsSchema = z.object({
-    tableName: z.string().min(1).describe("Name of the table whose relational metadata should be returned")
+    tableName: z.string().min(1).describe("Name of the table whose relational metadata should be returned"),
+    database: databaseArg
 });
 
 export const ExecuteBatchQueriesArgsSchema = z.object({
@@ -70,12 +79,14 @@ export const ExecuteBatchQueriesArgsSchema = z.object({
             params: z.array(z.string().or(z.number()).or(z.boolean()).or(z.null())).optional().describe("Parameters for parameterized queries")
         })
     ).min(1).max(20).describe("Array of query objects, each containing SQL and optional parameters"),
-    maxConcurrent: z.number().int().min(1).max(10).optional().default(5).describe("Maximum number of concurrent queries (default: 5)")
+    maxConcurrent: z.number().int().min(1).max(10).optional().default(5).describe("Maximum number of concurrent queries (default: 5)"),
+    database: databaseArg
 });
 
 export const DescribeBatchTablesArgsSchema = z.object({
     tableNames: z.array(z.string().min(1)).min(1).max(20).describe("Array of table names to describe"),
-    maxConcurrent: z.number().int().min(1).max(10).optional().default(5).describe("Maximum number of concurrent operations (default: 5)")
+    maxConcurrent: z.number().int().min(1).max(10).optional().default(5).describe("Maximum number of concurrent operations (default: 5)"),
+    database: databaseArg
 });
 
 export const GetTableDataArgsSchema = z.object({
@@ -93,16 +104,18 @@ export const GetTableDataArgsSchema = z.object({
     orderBy: z.array(z.object({
         column: z.string().min(1),
         direction: z.enum(['ASC', 'DESC']).default('ASC')
-    })).max(10).optional()
+    })).max(10).optional(),
+    database: databaseArg
 });
 
 export const AnalyzeTableStatisticsArgsSchema = z.object({
-    tableName: z.string().min(1).describe("Name of the table to analyze")
+    tableName: z.string().min(1).describe("Name of the table to analyze"),
+    database: databaseArg
 });
 
 export const VerifyWireEncryptionArgsSchema = z.object({});
 
-export const GetDatabaseInfoArgsSchema = z.object({});
+export const GetDatabaseInfoArgsSchema = z.object({ database: databaseArg });
 
 
 function assertSqlOperationAllowed(sql: string): void {
@@ -111,9 +124,10 @@ function assertSqlOperationAllowed(sql: string): void {
 
 /**
  * Sets up and returns the database tool definitions.
+ * @param registry - Databases the tools can run against; each server instance has its own.
  * @returns {Map<string, ToolDefinition>} A map with the tool definitions.
  */
-export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
+export const setupDatabaseTools = (registry: DatabaseRegistry = new DatabaseRegistry(() => getDefaultConfig())): Map<string, ToolDefinition> => {
     const tools = new Map<string, ToolDraft>();
 
     tools.set("execute-query", {
@@ -125,6 +139,7 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info('Executing database query');
 
             try {
+                const config = registry.resolve(args.database);
                 if (typeof sql !== 'string') {
                     throw new FirebirdError(
                         'Potentially unsafe SQL query',
@@ -133,7 +148,7 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
                 }
                 assertSqlOperationAllowed(sql);
 
-                const result = await executeQuery(sql, params);
+                const result = await executeQuery(sql, params, config);
                 logger.info(`Query executed successfully, ${result.length} rows returned`);
 
                 return toolResult({ rows: result });
@@ -150,11 +165,11 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
         name: "list-tables",
         description: "Lists all user tables in the current Firebird database.",
         inputSchema: ListTablesArgsSchema,
-        handler: async () => {
+        handler: async (args: z.infer<typeof ListTablesArgsSchema>) => {
             logger.info("Listing tables in the database");
 
             try {
-                const tables = await listTables();
+                const tables = await listTables(registry.resolve(args.database));
                 logger.info(`Found ${tables.length} tables`);
 
                 return toolResult({ tables });
@@ -176,8 +191,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Describing table: ${tableName}`);
 
             try {
+                const config = registry.resolve(args.database);
                 checkAllowedTable(tableName);
-                const schema = await describeTable(tableName);
+                const schema = await describeTable(tableName, config);
                 logger.info(`Schema obtained for table ${tableName}, ${schema.length} columns found`);
 
                 return toolResult({ schema });
@@ -198,8 +214,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Getting field descriptions for table: ${tableName}`);
 
             try {
+                const config = registry.resolve(args.database);
                 checkAllowedTable(tableName);
-                const fieldDescriptions = await getFieldDescriptions(tableName);
+                const fieldDescriptions = await getFieldDescriptions(tableName, config);
                 logger.info(`Descriptions obtained for ${fieldDescriptions.length} fields in table ${tableName}`);
 
                 return toolResult({ fieldDescriptions });
@@ -216,9 +233,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
         name: "get-table-indexes",
         description: "Returns all indexes for a table, including ordered columns, uniqueness, direction, and segment count.",
         inputSchema: TableMetadataArgsSchema,
-        handler: async ({ tableName }: z.infer<typeof TableMetadataArgsSchema>) => {
+        handler: async ({ tableName, database }: z.infer<typeof TableMetadataArgsSchema>) => {
             try {
-                return toolResult(await getTableIndexes(tableName));
+                return toolResult(await getTableIndexes(tableName, registry.resolve(database)));
             } catch (error) {
                 const errorResponse = wrapError(error);
                 logger.error(`Error getting indexes for table ${tableName}: ${errorResponse.error}`);
@@ -231,9 +248,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
         name: "get-table-constraints",
         description: "Returns PRIMARY KEY, FOREIGN KEY, UNIQUE, NOT NULL, and CHECK constraints for a table, including constrained columns and references.",
         inputSchema: TableMetadataArgsSchema,
-        handler: async ({ tableName }: z.infer<typeof TableMetadataArgsSchema>) => {
+        handler: async ({ tableName, database }: z.infer<typeof TableMetadataArgsSchema>) => {
             try {
-                return toolResult(await getTableConstraints(tableName));
+                return toolResult(await getTableConstraints(tableName, registry.resolve(database)));
             } catch (error) {
                 const errorResponse = wrapError(error);
                 logger.error(`Error getting constraints for table ${tableName}: ${errorResponse.error}`);
@@ -246,9 +263,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
         name: "get-table-triggers",
         description: "Returns only the triggers associated with a table, including source, description, sequence, type, and active state.",
         inputSchema: TableMetadataArgsSchema,
-        handler: async ({ tableName }: z.infer<typeof TableMetadataArgsSchema>) => {
+        handler: async ({ tableName, database }: z.infer<typeof TableMetadataArgsSchema>) => {
             try {
-                return toolResult(await getTableTriggers(tableName));
+                return toolResult(await getTableTriggers(tableName, registry.resolve(database)));
             } catch (error) {
                 const errorResponse = wrapError(error);
                 logger.error(`Error getting triggers for table ${tableName}: ${errorResponse.error}`);
@@ -267,11 +284,13 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info('Executing analyze-query-performance tool');
 
             try {
+                const config = registry.resolve(request.database);
                 assertSqlOperationAllowed(sql);
                 const result = await analyzeQueryPerformance(
                     sql,
                     params || [],
-                    iterations || 3
+                    iterations || 3,
+                    config
                 );
 
                 return toolResult(result, {
@@ -297,8 +316,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info('Executing get-execution-plan tool');
 
             try {
+                const config = registry.resolve(request.database);
                 assertSqlOperationAllowed(sql);
-                const result = await getExecutionPlan(sql, params || []);
+                const result = await getExecutionPlan(sql, params || [], config);
 
                 return toolResult(result, {
                     isError: result.success === false,
@@ -323,8 +343,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info('Executing analyze-missing-indexes tool');
 
             try {
+                const config = registry.resolve(request.database);
                 assertSqlOperationAllowed(sql);
-                const result = await analyzeMissingIndexes(sql);
+                const result = await analyzeMissingIndexes(sql, config);
 
                 return toolResult(result, {
                     isError: result.success === false,
@@ -350,12 +371,13 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Executing batch of ${queries.length} queries with max concurrency ${maxConcurrent}`);
 
             try {
+                const config = registry.resolve(args.database);
                 // Validate each query for security
                 queries.forEach(query => {
                     assertSqlOperationAllowed(query.sql);
                 });
 
-                const results = await executeBatchQueries(queries, undefined, maxConcurrent);
+                const results = await executeBatchQueries(queries, config, maxConcurrent);
 
                 logger.info(`Batch execution completed: ${results.filter(r => r.success).length} succeeded, ${results.filter(r => !r.success).length} failed`);
 
@@ -382,8 +404,9 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Describing batch of ${tableNames.length} tables with max concurrency ${maxConcurrent}`);
 
             try {
+                const config = registry.resolve(args.database);
                 tableNames.forEach(checkAllowedTable);
-                const results = await describeBatchTables(tableNames, undefined, maxConcurrent);
+                const results = await describeBatchTables(tableNames, config, maxConcurrent);
 
                 logger.info(`Batch description completed: ${results.filter(r => r.schema !== null).length} succeeded, ${results.filter(r => r.schema === null).length} failed`);
 
@@ -411,6 +434,7 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Getting data from table: ${tableName}`);
 
             try {
+                const config = registry.resolve(args.database);
                 checkAllowedOperation('SELECT');
                 checkAllowedTable(tableName);
                 const quotedTable = quoteIdentifier(tableName);
@@ -438,7 +462,7 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
                 if (clauses.length) sql += ` WHERE ${clauses.join(' AND ')}`;
                 if (ordering.length) sql += ` ORDER BY ${ordering.join(', ')}`;
 
-                const result = await executeQuery(sql, params);
+                const result = await executeQuery(sql, params, config);
                 logger.info(`Retrieved ${result.length} rows from ${tableName}`);
 
                 return toolResult({
@@ -466,19 +490,20 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
             logger.info(`Analyzing statistics for table: ${tableName}`);
 
             try {
+                const config = registry.resolve(args.database);
                 checkAllowedOperation('SELECT');
                 checkAllowedTable(tableName);
                 const quotedTable = quoteIdentifier(tableName);
                 // Get row count. ROW_COUNT is a reserved token in Firebird 2.5 and
                 // cannot be used as an alias, so the count is projected as TOTAL_ROWS.
-                const countResult = await executeQuery(`SELECT COUNT(*) as TOTAL_ROWS FROM ${quotedTable}`);
+                const countResult = await executeQuery(`SELECT COUNT(*) as TOTAL_ROWS FROM ${quotedTable}`, [], config);
                 const rowCount = Number(countResult[0]?.TOTAL_ROWS ?? 0);
 
                 // Get table schema
-                const schema = await describeTable(tableName);
+                const schema = await describeTable(tableName, config);
 
                 // Get sample data for analysis
-                const sampleData = await executeQuery(`SELECT FIRST 100 * FROM ${quotedTable}`);
+                const sampleData = await executeQuery(`SELECT FIRST 100 * FROM ${quotedTable}`, [], config);
 
                 const statistics = {
                     tableName,
@@ -541,15 +566,18 @@ export const setupDatabaseTools = (): Map<string, ToolDefinition> => {
     tools.set("get-database-info", {
         name: "get-database-info",
         title: "Get Database Info",
-        description: "Retrieves general information about the connected Firebird database.",
+        description: "Retrieves general information about a connected Firebird database: its alias, path and tables.",
         inputSchema: GetDatabaseInfoArgsSchema,
-        handler: async () => {
+        handler: async (args: z.infer<typeof GetDatabaseInfoArgsSchema>) => {
             logger.info("Getting database information");
 
             try {
-                const tables = await listTables();
+                const { alias, path } = registry.describe(args.database);
+                const tables = await listTables(registry.resolve(args.database));
 
                 const info = {
+                    database: alias,
+                    path,
                     totalTables: tables.length,
                     tables: tables
                 };

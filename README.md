@@ -200,6 +200,30 @@ For VSCode and GitHub Copilot integration, see [VSCode Integration](./docs/vscod
 
 3. Restart Claude Desktop
 
+## Connecting More Than One Database (stdio only)
+
+With the `stdio` transport, the model can open other databases on the same Firebird server during the conversation, without restarting the server. Three tools manage the connections:
+
+- `connect-database` takes `path` and an optional `alias`, tests the connection and returns the alias to use.
+- `list-databases` returns the default database and the connected ones, each with its alias and path. It never returns credentials.
+- `disconnect-database` takes `alias` and closes the connections of that database. The `default` database cannot be disconnected.
+
+Every tool that queries a database accepts an optional `database` argument with an alias. Without it, or with `default`, the tool uses the database configured at startup.
+
+```json
+{ "path": "D:\\clients\\c42\\erp.fdb" }
+```
+
+`connect-database` answers `{ "alias": "erp", "path": "D:\\clients\\c42\\erp.fdb", "alreadyConnected": false }`. Later calls pass the alias:
+
+```json
+{ "tableName": "CUSTOMERS", "database": "erp" }
+```
+
+Host, port, user, password, role and wire encryption always come from the server configuration. The path must be absolute (`D:\data\app.fdb`, `D:/data/app.fdb` or `/data/app.fdb`). Host prefixes, UNC paths, protocols such as `inet://`, relative paths and `databases.conf` aliases are refused. Resources, prompts and events keep using the default database. The three connection tools are not available with `http`, `sse` or `unified`, where `database` accepts only `default`.
+
+**Risk:** the model can connect any database that the server credential can open on that Firebird server. Set `DatabaseAccess = Restrict <folder list>` in `firebird.conf`, run the server with a Firebird user that is not `SYSDBA`, and keep tool approval on in the client for `connect-database`. See [docs/configuration.md](docs/configuration.md#connecting-more-than-one-database) for all rules.
+
 ## Transport Configuration
 
 MCP Firebird supports multiple transport protocols to accommodate different client needs and deployment scenarios.

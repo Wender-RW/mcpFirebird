@@ -26,7 +26,7 @@ describe('table-scoped relational metadata', () => {
                 columns: ['LAST_NAME', 'FIRST_NAME']
             }]
         });
-        expect(mockedExecuteQuery).toHaveBeenCalledWith(expect.any(String), ['CUSTOMERS']);
+        expect(mockedExecuteQuery).toHaveBeenCalledWith(expect.any(String), ['CUSTOMERS'], undefined);
     });
 
     it('groups foreign-key columns and their referenced columns', async () => {

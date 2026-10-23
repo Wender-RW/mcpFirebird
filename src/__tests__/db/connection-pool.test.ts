@@ -15,7 +15,7 @@ jest.mock('../../db/driver-factory.js', () => ({
     DriverType: { PURE_JS: 'node-firebird', NATIVE: 'node-firebird-driver-native' }
 }));
 
-import { ConnectionPool, ConfigOptions } from '../../db/connection.js';
+import { ConnectionPool, ConfigOptions, getPool, closeDatabasePool, closePool } from '../../db/connection.js';
 import { DriverFactory } from '../../db/driver-factory.js';
 
 interface FakeDb {
@@ -311,5 +311,63 @@ describe('ConnectionPool self-healing', () => {
         const db2 = await pool.acquire();
         expect(db2).toBe(db1);          // detach() recycled it, didn't close it
         expect((db1 as FakeDb).detached).toBe(false);
+    });
+});
+
+describe('one pool per database', () => {
+    const other: ConfigOptions = { ...config, database: '/tmp/other.fdb' };
+
+    afterEach(async () => { await closePool(); });
+
+    test('different databases get different pools and the same database gets the same pool', () => {
+        expect(getPool(config)).not.toBe(getPool(other));
+        expect(getPool(config)).toBe(getPool({ ...config }));
+    });
+
+    test('host, port and user are part of the pool identity', () => {
+        const base = getPool(config);
+        expect(getPool({ ...config, host: '10.0.0.2' })).not.toBe(base);
+        expect(getPool({ ...config, port: 3051 })).not.toBe(base);
+        expect(getPool({ ...config, user: 'OTHER' })).not.toBe(base);
+        expect(getPool({ ...config, password: 'changed' })).toBe(base);
+    });
+
+    test('Windows paths that differ only in separators, drive case or letter case share a pool', () => {
+        const windows = { ...config, database: 'D:\\clientes\\erp.fdb' };
+        expect(getPool({ ...windows, database: 'd:/clientes/ERP.fdb' })).toBe(getPool(windows));
+    });
+
+    test('Unix paths that differ only in letter case do not share a pool', () => {
+        expect(getPool({ ...config, database: '/dados/ERP.fdb' })).not.toBe(getPool({ ...config, database: '/dados/erp.fdb' }));
+    });
+
+    test('closing one database leaves the other pool serving acquire()', async () => {
+        const first = await getPool(config).acquire() as FakeDb;
+        getPool(config).release(first);
+        const second = await getPool(other).acquire() as FakeDb;
+        getPool(other).release(second);
+
+        await closeDatabasePool(config);
+
+        expect(first.detached).toBe(true);
+        expect(second.detached).toBe(false);
+        const again = await getPool(other).acquire();
+        expect(again).toBe(second);
+        // The closed database starts a fresh pool on the next use.
+        const reopened = await getPool(config).acquire() as FakeDb;
+        expect(reopened).not.toBe(first);
+        expect(reopened.alive).toBe(true);
+    });
+
+    test('closePool closes every pool', async () => {
+        const first = await getPool(config).acquire() as FakeDb;
+        getPool(config).release(first);
+        const second = await getPool(other).acquire() as FakeDb;
+        getPool(other).release(second);
+
+        await closePool();
+
+        expect(first.detached).toBe(true);
+        expect(second.detached).toBe(true);
     });
 });

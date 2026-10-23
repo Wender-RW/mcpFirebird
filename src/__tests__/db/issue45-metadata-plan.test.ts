@@ -1,5 +1,5 @@
 jest.mock('../../db/connection.js', () => ({
-    DEFAULT_CONFIG: {}, getGlobalConfig: jest.fn(), connectToDatabase: jest.fn(), queryDatabase: jest.fn(),
+    DEFAULT_CONFIG: {}, getGlobalConfig: jest.fn(), getDefaultConfig: jest.fn(() => ({ database: 'default-db' })), connectToDatabase: jest.fn(), queryDatabase: jest.fn(),
     getPool: jest.fn(() => ({ release: releaseMock, destroy: destroyMock }))
 }));
 jest.mock('../../security/audit.js', () => ({ logQueryExecution: jest.fn().mockResolvedValue(undefined) }));

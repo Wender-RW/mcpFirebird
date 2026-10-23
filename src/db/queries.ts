@@ -1,15 +1,12 @@
 // Consultas a la base de datos
-import { existsSync, readdirSync } from 'fs';
-import { join, extname } from 'path';
 import { createLogger } from '../utils/logger.js';
 import {
     connectToDatabase,
     queryDatabase,
     getPool,
-    DEFAULT_CONFIG,
+    getDefaultConfig,
     FirebirdDatabase,
-    ConfigOptions,
-    getGlobalConfig
+    ConfigOptions
 } from './connection.js';
 import { FirebirdError } from '../utils/errors.js';
 import { validateSql } from '../utils/security.js';
@@ -23,6 +20,7 @@ import { applyDataMasking } from '../security/dataMasking.js';
 import { checkQueryCountLimit, checkRateLimit, checkResponseSizeLimit, checkRowLimit } from '../security/resourceLimits.js';
 import { currentSecurityContext } from '../security/context.js';
 import { logQueryExecution } from '../security/audit.js';
+import { getConfigAlias } from './database-registry.js';
 
 export { readBlobField, resolveBlobFields } from './blob.js';
 
@@ -31,18 +29,9 @@ function isTableVisible(name: string): boolean {
     try { checkAllowedTable(name.trim()); return true; } catch { return false; }
 }
 
-// Directorio de bases de datos
-export const DATABASE_DIR = process.env.FIREBIRD_DB_DIR || './databases';
-
 /**
  * Interfaces para resultados de consultas
  */
-export interface DatabaseInfo {
-    name: string;
-    path: string;
-    uri: string;
-}
-
 export interface TableInfo {
     name: string;
     uri: string;
@@ -93,18 +82,15 @@ export interface ExecutionPlanResult {
  * @returns {Promise<any[]>} Results of the query execution
  * @throws {FirebirdError} If there is a connection or query error
  */
-export const executeQuery = (sql: string, params: any[] = [], config = DEFAULT_CONFIG): Promise<any[]> => executeGuarded(sql, params, config, 'user');
+export const executeQuery = (sql: string, params: any[] = [], config?: ConfigOptions): Promise<any[]> => executeGuarded(sql, params, config, 'user');
 // Only fixed, parameterized SQL authored by this server may use these internal paths.
-export const executeMetadataQuery = (sql: string, params: any[] = [], config = DEFAULT_CONFIG): Promise<any[]> => executeGuarded(sql, params, config, 'metadata');
-export const executeAuditQuery = (sql: string, params: any[] = [], config = DEFAULT_CONFIG): Promise<any[]> => executeGuarded(sql, params, config, 'audit');
+export const executeMetadataQuery = (sql: string, params: any[] = [], config?: ConfigOptions): Promise<any[]> => executeGuarded(sql, params, config, 'metadata');
+export const executeAuditQuery = (sql: string, params: any[] = [], config?: ConfigOptions): Promise<any[]> => executeGuarded(sql, params, config, 'audit');
 
-async function executeGuarded(sql: string, params: any[], config: ConfigOptions, kind: 'user' | 'metadata' | 'audit' | 'plan'): Promise<any[]> {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for executeQuery: ${globalConfig.database}`);
-        config = globalConfig;
-    }
+async function executeGuarded(sql: string, params: any[], explicitConfig: ConfigOptions | undefined, kind: 'user' | 'metadata' | 'audit' | 'plan'): Promise<any[]> {
+    // An explicit config selects the database; the configured default applies only when none is given.
+    const config = explicitConfig ?? getDefaultConfig();
+    const target = { alias: getConfigAlias(config), path: config.database };
     let db: FirebirdDatabase | null = null;
     let succeeded = false;
     let timer: NodeJS.Timeout | undefined;
@@ -128,7 +114,7 @@ async function executeGuarded(sql: string, params: any[], config: ConfigOptions,
         if (kind !== 'audit') {
             if (kind === 'metadata') checkAllowedOperation('SELECT');
             // Record intent before dispatch. An unavailable audit sink prevents execution.
-            await logQueryExecution(originalSql, params, '', '', true, '', 0, 0);
+            await logQueryExecution(originalSql, params, '', '', true, '', 0, 0, undefined, target);
         }
         const timeout = Math.min(securityConfig.queryTimeout || Infinity, securityConfig.resourceLimits?.maxQueryCpuTime || Infinity);
         const ownerPool = getPool(config);
@@ -172,7 +158,7 @@ async function executeGuarded(sql: string, params: any[], config: ConfigOptions,
             // Free the user-query attachment before database auditing borrows one.
             // Otherwise concurrent audited queries can exhaust the pool and deadlock.
             if (db) { getPool(config).release(db); db = null; }
-            await logQueryExecution(originalSql, params, '', '', true, '', Date.now() - start, resolved.length, resolved);
+            await logQueryExecution(originalSql, params, '', '', true, '', Date.now() - start, resolved.length, resolved, target);
         }
         succeeded = true;
         return resolved;
@@ -180,7 +166,7 @@ async function executeGuarded(sql: string, params: any[], config: ConfigOptions,
         if (timer) clearTimeout(timer);
         if (db && !workPending) { getPool(config).destroy(db); db = null; }
         if (kind !== 'audit') {
-            try { await logQueryExecution(originalSql, params, '', '', false, 'Query rejected or failed', Date.now() - start); }
+            try { await logQueryExecution(originalSql, params, '', '', false, 'Query rejected or failed', Date.now() - start, 0, undefined, target); }
             catch { /* Original failure is still returned; no unlogged result is exposed. */ }
         }
         // Propagar el error original si ya es un FirebirdError
@@ -209,48 +195,12 @@ async function executeGuarded(sql: string, params: any[], config: ConfigOptions,
 }
 
 /**
- * Lista todas las bases de datos Firebird disponibles en el directorio de bases de datos
- * @returns {DatabaseInfo[]} Array de objetos de base de datos con nombre, ruta y URI
- */
-export const getDatabases = (): DatabaseInfo[] => {
-    try {
-        logger.info(`Buscando bases de datos en: ${DATABASE_DIR}`);
-
-        if (!existsSync(DATABASE_DIR)) {
-            logger.warn(`El directorio de bases de datos no existe: ${DATABASE_DIR}`);
-            return [];
-        }
-
-        const databases = readdirSync(DATABASE_DIR)
-            .filter(file => ['.fdb', '.gdb'].includes(extname(file).toLowerCase()))
-            .map(file => ({
-                name: file,
-                path: join(DATABASE_DIR, file),
-                uri: `firebird://database/${file}`
-            }));
-
-        logger.info(`Se encontraron ${databases.length} bases de datos`);
-        return databases;
-    } catch (error: any) {
-        const errorMessage = `Error listing databases: ${error.message || error}`;
-        logger.error(errorMessage);
-        return [];
-    }
-};
-
-/**
  * Obtiene todas las tablas de usuario de la base de datos
  * @param {ConfigOptions} config - Configuración de conexión a la base de datos (opcional)
  * @returns {Promise<TableInfo[]>} Array de objetos de tabla con nombre y URI
  * @throws {FirebirdError} Si hay un error de conexión o de consulta
  */
-export const getTables = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for getTables: ${globalConfig.database}`);
-        config = globalConfig;
-    }
+export const getTables = async (config?: ConfigOptions): Promise<TableInfo[]> => {
     try {
         logger.info('Obteniendo lista de tablas');
 
@@ -289,13 +239,7 @@ export const getTables = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =
  * @returns {Promise<TableInfo[]>} Array de objetos de vista con nombre y URI
  * @throws {FirebirdError} Si hay un error de conexión o de consulta
  */
-export const getViews = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for getViews: ${globalConfig.database}`);
-        config = globalConfig;
-    }
+export const getViews = async (config?: ConfigOptions): Promise<TableInfo[]> => {
     try {
         logger.info('Obteniendo lista de vistas');
 
@@ -334,7 +278,7 @@ export const getViews = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> =>
  * @returns {Promise<TableInfo[]>} Array de objetos de procedimiento con nombre y URI
  * @throws {FirebirdError} Si hay un error de conexión o de consulta
  */
-export const getProcedures = async (config = DEFAULT_CONFIG): Promise<TableInfo[]> => {
+export const getProcedures = async (config?: ConfigOptions): Promise<TableInfo[]> => {
     try {
         logger.info('Obteniendo lista de procedimientos almacenados');
 
@@ -373,14 +317,8 @@ export const getProcedures = async (config = DEFAULT_CONFIG): Promise<TableInfo[
  * @returns {Promise<FieldInfo[]>} Array de objetos que contienen nombres y descripciones de campos
  * @throws {FirebirdError} Si hay un error de conexión, de consulta o el nombre de tabla es inválido
  */
-export const getFieldDescriptions = async (tableName: string, config = DEFAULT_CONFIG): Promise<FieldInfo[]> => {
+export const getFieldDescriptions = async (tableName: string, config?: ConfigOptions): Promise<FieldInfo[]> => {
     checkAllowedTable(tableName);
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for getFieldDescriptions: ${globalConfig.database}`);
-        config = globalConfig;
-    }
     try {
         logger.info(`Obteniendo descripciones de campos para la tabla: ${tableName}`);
 
@@ -434,14 +372,8 @@ export const getFieldDescriptions = async (tableName: string, config = DEFAULT_C
  * @returns {Promise<ColumnInfo[]>} Array de objetos con información detallada de cada columna
  * @throws {FirebirdError} Si hay un error de conexión, de consulta o el nombre de tabla es inválido
  */
-export const describeTable = async (tableName: string, config = DEFAULT_CONFIG): Promise<ColumnInfo[]> => {
+export const describeTable = async (tableName: string, config?: ConfigOptions): Promise<ColumnInfo[]> => {
     checkAllowedTable(tableName);
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for describeTable: ${globalConfig.database}`);
-        config = globalConfig;
-    }
     try {
         logger.info(`Obteniendo estructura de la tabla: ${tableName}`);
 
@@ -534,13 +466,7 @@ export const describeTable = async (tableName: string, config = DEFAULT_CONFIG):
  * @returns {Promise<string[]>} Array de nombres de tablas
  * @throws {FirebirdError} Si hay un error de conexión o de consulta
  */
-export const listTables = async (config = DEFAULT_CONFIG): Promise<string[]> => {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for listTables: ${globalConfig.database}`);
-        config = globalConfig;
-    }
+export const listTables = async (config?: ConfigOptions): Promise<string[]> => {
     try {
         logger.info('Obteniendo lista de tablas de usuario');
 
@@ -584,7 +510,7 @@ export const analyzeQueryPerformance = async (
     sql: string,
     params: any[] = [],
     iterations: number = 3,
-    config = DEFAULT_CONFIG
+    config?: ConfigOptions
 ): Promise<QueryPerformanceResult> => {
     try {
         // Validate the SQL query to prevent injection
@@ -691,7 +617,7 @@ export const analyzeQueryPerformance = async (
 export const getExecutionPlan = async (
     sql: string,
     params: any[] = [],
-    config = getGlobalConfig() || DEFAULT_CONFIG
+    config?: ConfigOptions
 ): Promise<ExecutionPlanResult> => {
     try {
         const rows = await executeGuarded(sql, params, config, 'plan');
@@ -725,7 +651,7 @@ export const getExecutionPlan = async (
  */
 export const analyzeMissingIndexes = async (
     sql: string,
-    config = DEFAULT_CONFIG
+    config?: ConfigOptions
 ): Promise<{missingIndexes: string[], recommendations: string[], success: boolean, error?: string}> => {
     try {
         prepareUserQuery(sql);
@@ -752,15 +678,9 @@ export const analyzeMissingIndexes = async (
  */
 export const executeBatchQueries = async (
     queries: Array<{sql: string, params?: any[]}>,
-    config = DEFAULT_CONFIG,
+    config?: ConfigOptions,
     maxConcurrent: number = 5
 ): Promise<Array<{success: boolean, data?: any[], error?: string, errorType?: string}>> => {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for executeBatchQueries: ${globalConfig.database}`);
-        config = globalConfig;
-    }
 
     // Validate input
     if (!Array.isArray(queries) || queries.length === 0) {
@@ -855,15 +775,9 @@ export const executeBatchQueries = async (
  */
 export const describeBatchTables = async (
     tableNames: string[],
-    config = DEFAULT_CONFIG,
+    config?: ConfigOptions,
     maxConcurrent: number = 5
 ): Promise<Array<{tableName: string, schema: ColumnInfo[] | null, error?: string, errorType?: string}>> => {
-    // Try to load config from global variable first
-    const globalConfig = getGlobalConfig();
-    if (globalConfig && globalConfig.database) {
-        logger.info(`Using global configuration for describeBatchTables: ${globalConfig.database}`);
-        config = globalConfig;
-    }
 
     // Validate input
     if (!Array.isArray(tableNames) || tableNames.length === 0) {

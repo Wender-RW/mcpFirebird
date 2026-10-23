@@ -2,7 +2,6 @@ export interface MCPConfig {
   host: string;
   port: number;
   database: string;
-  database_dir?: string;
   user: string;
   password: string;
   role?: string;

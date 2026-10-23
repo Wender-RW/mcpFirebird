@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+- Add `connect-database`, `list-databases` and `disconnect-database`, registered only with `TRANSPORT_TYPE=stdio`. The model can open other databases on the configured Firebird server during the conversation. Host, port, user, password, role and wire encryption come from the server configuration; only an absolute file path is accepted, and host prefixes, UNC paths, protocols, relative paths and `databases.conf` aliases are refused.
+- Add an optional `database` argument (an alias) to every tool that queries a database. Without it, or with `default`, tools use the database configured at startup, so existing clients do not change. With `http`, `sse` and `unified`, `database` accepts only `default`. Resources, prompts and `POST_EVENT` events keep using the default database.
+- Keep one connection pool per database, and stop replacing an explicit connection config with the global one. `FIREBIRD_POOL_MAX` and `FIREBIRD_POOL_IDLE_MS` apply to each pool.
+- Connected databases follow the same security policy as the default database: allowed tables and operations, data masking, resource limits and audit.
+- **Breaking for audit tables stored in a database** (`audit.destination` `database` or `both`): each audit record now carries the alias and path of the database it ran on, in new columns `DATABASE_ALIAS` and `DATABASE_PATH`. Before updating, run on the database that holds the audit table: `ALTER TABLE <audit table> ADD DATABASE_ALIAS VARCHAR(63), ADD DATABASE_PATH VARCHAR(255);`. An existing table without the columns stops the server at startup, with an error that contains this statement. Audit files get the fields `database` and `databasePath`. Audit records are still written to the default database. Going back to the previous version needs no change: it ignores the extra columns.
+- Remove code that nothing used: `getDatabases()`, `DATABASE_DIR` (`FIREBIRD_DB_DIR`), the `DatabaseInfo` type and the `database_dir` field. Remove `FIREBIRD_DATABASE_DIR` from `docs/configuration.md`; the server never read that variable.
+- Connecting a database gives the model access to every database the server credential can open. See [Connecting More Than One Database](docs/configuration.md#connecting-more-than-one-database) for `DatabaseAccess` in `firebird.conf` and the other precautions.
+
 ## [2.12.3] - 2026-10-17
 
 - Promote all changes from 2.13.0-alpha.1 into the stable 2.12 release line: real prepare-only optimizer plans and catalog-aware missing-index advice for #45.

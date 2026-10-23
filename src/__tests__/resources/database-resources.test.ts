@@ -110,7 +110,7 @@ describe('database MCP resources', () => {
         const result = 'text' in content ? JSON.parse(content.text as string) : null;
 
         expect(result.triggers[0].source).toBe('AS BEGIN END');
-        expect(mockedExecuteQuery).toHaveBeenCalledWith(expect.stringContaining('RDB$RELATION_NAME = ?'), ['ACCOUNT']);
+        expect(mockedExecuteQuery).toHaveBeenCalledWith(expect.stringContaining('RDB$RELATION_NAME = ?'), ['ACCOUNT'], undefined);
     });
 
     it('uses a non-reserved alias for statistics row counts', async () => {

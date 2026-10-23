@@ -1,4 +1,5 @@
 import { checkAllowedOperation, checkAllowedTable } from '../security/authorization.js';
+import type { ConfigOptions } from './connection.js';
 import { executeMetadataQuery as executeQuery } from './queries.js';
 
 const trimmed = (value: unknown): string | undefined => {
@@ -7,7 +8,7 @@ const trimmed = (value: unknown): string | undefined => {
     return undefined;
 };
 
-export async function getTableIndexes(tableName: string) {
+export async function getTableIndexes(tableName: string, config?: ConfigOptions) {
     checkAllowedOperation('SELECT');
     checkAllowedTable(tableName.toUpperCase());
 
@@ -24,7 +25,7 @@ export async function getTableIndexes(tableName: string) {
         WHERE I.RDB$RELATION_NAME = ?
           AND COALESCE(I.RDB$SYSTEM_FLAG, 0) = 0
         ORDER BY I.RDB$INDEX_NAME, S.RDB$FIELD_POSITION
-    `, [tableName.toUpperCase()]);
+    `, [tableName.toUpperCase()], config);
 
     const indexes = new Map<string, any>();
     for (const row of rows) {
@@ -46,7 +47,7 @@ export async function getTableIndexes(tableName: string) {
     return { tableName, indexes: Array.from(indexes.values()) };
 }
 
-export async function getTableConstraints(tableName: string) {
+export async function getTableConstraints(tableName: string, config?: ConfigOptions) {
     checkAllowedOperation('SELECT');
     checkAllowedTable(tableName.toUpperCase());
 
@@ -71,7 +72,7 @@ export async function getTableConstraints(tableName: string) {
         LEFT JOIN RDB$TRIGGERS T ON CC.RDB$TRIGGER_NAME = T.RDB$TRIGGER_NAME
         WHERE RC.RDB$RELATION_NAME = ?
         ORDER BY RC.RDB$CONSTRAINT_NAME, S.RDB$FIELD_POSITION
-    `, [tableName.toUpperCase()]);
+    `, [tableName.toUpperCase()], config);
 
     const constraints = new Map<string, any>();
     for (const row of rows) {
@@ -105,7 +106,7 @@ export async function getTableConstraints(tableName: string) {
     return { tableName, constraints: Array.from(constraints.values()) };
 }
 
-export async function getTableTriggers(tableName: string) {
+export async function getTableTriggers(tableName: string, config?: ConfigOptions) {
     checkAllowedOperation('SELECT');
     checkAllowedTable(tableName.toUpperCase());
 
@@ -121,7 +122,7 @@ export async function getTableTriggers(tableName: string) {
         WHERE RDB$RELATION_NAME = ?
           AND COALESCE(RDB$SYSTEM_FLAG, 0) = 0
         ORDER BY RDB$TRIGGER_NAME
-    `, [tableName.toUpperCase()]);
+    `, [tableName.toUpperCase()], config);
 
     return {
         tableName,

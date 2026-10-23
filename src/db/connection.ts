@@ -7,6 +7,7 @@ import { createLogger } from '../utils/logger.js';
 import { FirebirdError, ErrorTypes } from '../utils/errors.js';
 import { DriverFactory } from './driver-factory.js';
 import { resolveBlobFields } from './blob.js';
+import { databasePathKey } from './database-path.js';
 import Firebird from 'node-firebird';
 
 const logger = createLogger('db:connection');
@@ -165,8 +166,13 @@ export const DEFAULT_CONFIG: ConfigOptions = {
 
 // FirebirdError is now imported from '../utils/errors.js'
 
-// Store pool instance globally to persist across requests
-let globalPool: ConnectionPool | null = null;
+// One pool per database, kept for the whole process so requests share connections.
+const pools = new Map<string, ConnectionPool>();
+
+/** Pool key: server, port, user and normalized database path. */
+export function poolKey(config: ConfigOptions): string {
+    return [config.host, config.port, config.user, databasePathKey(config.database)].join('|');
+}
 
 // Pool defaults (overridable via env). See .env.example.
 const DEFAULT_POOL_MAX = 5;
@@ -390,27 +396,42 @@ export class ConnectionPool {
 }
 
 /**
- * Obtiene o crea el pool global de conexiones.
- * Pool sizing is configurable via FIREBIRD_POOL_MAX and FIREBIRD_POOL_IDLE_MS.
+ * Obtiene o crea el pool de conexiones de la base de datos indicada por `config`.
+ * Configs con el mismo servidor, puerto, usuario y ruta comparten pool.
+ * Pool sizing is configurable via FIREBIRD_POOL_MAX and FIREBIRD_POOL_IDLE_MS and applies to each pool.
  */
 export const getPool = (config: ConfigOptions = getDefaultConfig()): ConnectionPool => {
-    if (!globalPool) {
+    const key = poolKey(config);
+    let pool = pools.get(key);
+    if (!pool) {
         const maxConnections = readIntEnv('FIREBIRD_POOL_MAX', DEFAULT_POOL_MAX);
         const idleMs = readIntEnv('FIREBIRD_POOL_IDLE_MS', DEFAULT_POOL_IDLE_MS);
-        logger.info('Inicializando Global Connection Pool', { maxConnections, idleMs });
-        globalPool = new ConnectionPool(config, maxConnections, idleMs);
+        logger.info('Inicializando Connection Pool', { database: config.database, maxConnections, idleMs });
+        pool = new ConnectionPool(config, maxConnections, idleMs);
+        pools.set(key, pool);
     }
-    return globalPool;
+    return pool;
 };
 
 /**
- * Cierra todas las conexiones del pool global
+ * Cierra solo el pool de la base de datos indicada; los demás siguen atendiendo.
+ */
+export const closeDatabasePool = async (config: ConfigOptions): Promise<void> => {
+    const key = poolKey(config);
+    const pool = pools.get(key);
+    if (pool) {
+        pools.delete(key);
+        await pool.destroyAll();
+    }
+};
+
+/**
+ * Cierra todas las conexiones de todos los pools
  */
 export const closePool = async (): Promise<void> => {
-    if (globalPool) {
-        await globalPool.destroyAll();
-        globalPool = null;
-    }
+    const open = [...pools.values()];
+    pools.clear();
+    await Promise.all(open.map(pool => pool.destroyAll()));
 };
 
 /**

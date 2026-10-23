@@ -61,3 +61,20 @@ test('all database-backed metadata handlers mark policy failures as tool errors'
         securityConfig.forbiddenOperations = original;
     }
 });
+
+const databaseBacked = new Set([
+    'list-available-events', 'list-triggers', 'describe-trigger', 'list-procedures', 'describe-procedure',
+    'list-functions', 'describe-function', 'list-packages', 'describe-package'
+]);
+
+test('database-backed metadata tools advertise an optional `database` argument and the others do not', () => {
+    for (const [name, tool] of tools) {
+        const schema = z.toJSONSchema(tool.inputSchema);
+        if (databaseBacked.has(name)) {
+            assert.equal(schema.properties.database.type, 'string', name);
+            assert.ok(!(schema.required || []).includes('database'), name);
+        } else {
+            assert.ok(!('database' in (schema.properties || {})), name);
+        }
+    }
+});

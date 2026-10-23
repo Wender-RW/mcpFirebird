@@ -2,7 +2,7 @@
 import { createLogger } from '../utils/logger.js';
 import { wrapError } from '../utils/jsonHelper.js';
 import { z } from 'zod';
-import { finalizeTools, toolResult, toolError, type ToolDraft, type ToolDefinition } from './contracts.js';
+import { finalizeTools, toolResult, toolError, databaseArg, type ToolDraft, type ToolDefinition } from './contracts.js';
 import { metadataResultSchemas } from './outputSchemas.js';
 export type { ToolDefinition } from './contracts.js';
 import { readFileSync } from 'fs';
@@ -20,6 +20,8 @@ import {
     listAvailableEvents
 } from '../db/metadata.js';
 import { checkAllowedOperation } from '../security/authorization.js';
+import { DatabaseRegistry } from '../db/database-registry.js';
+import { getDefaultConfig } from '../db/index.js';
 
 
 const logger = createLogger('tools:metadata');
@@ -33,9 +35,15 @@ const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
 /**
  * Configura las herramientas de metadatos, tomando las herramientas de base de datos como entrada.
  * @param databaseTools - Mapa de herramientas de base de datos ya configuradas.
+ * @param catalogNames - Nombres de todas las herramientas registradas en el servidor.
+ * @param registry - Bases de datos sobre las que pueden ejecutarse las herramientas; cada instancia del servidor tiene el suyo.
  * @returns Map<string, ToolDefinition> - Mapa con las herramientas de metadatos.
  */
-export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, catalogNames?: () => string[]): Map<string, ToolDefinition> {
+export function setupMetadataTools(
+    databaseTools: Map<string, ToolDefinition>,
+    catalogNames?: () => string[],
+    registry: DatabaseRegistry = new DatabaseRegistry(() => getDefaultConfig())
+): Map<string, ToolDefinition> {
     const tools = new Map<string, ToolDraft>();
     // The server supplies its registered catalog, including simple/event tools.
     // Standalone callers retain the catalog assembled from their own maps.
@@ -189,11 +197,11 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
     tools.set('list-available-events', {
         title: 'List Available Events',
         description: 'Lists native events (POST_EVENT) available in database triggers and procedures',
-        inputSchema: z.object({}),
-        handler: async () => {
+        inputSchema: z.object({ database: databaseArg }),
+        handler: async (args: { database?: string }) => {
             try {
                 checkAllowedOperation('EXECUTE');
-                const events = await listAvailableEvents();
+                const events = await listAvailableEvents(registry.resolve(args.database));
                 return toolResult(events, { prefix: `Available Firebird events (POST_EVENT):\n\n` });
             } catch (error) {
                 return toolError(error);
@@ -205,15 +213,15 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
     tools.set('list-triggers', {
         title: 'List Triggers',
         description: 'Lists all database triggers with their associated table, trigger type, and status',
-        inputSchema: z.object({}),
-        handler: async () => {
+        inputSchema: z.object({ database: databaseArg }),
+        handler: async (args: { database?: string }) => {
             logger.info('Listing triggers');
 
             try {
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const triggers = await listTriggers();
+                const triggers = await listTriggers(registry.resolve(args.database));
                 logger.info(`Retrieved ${triggers.length} triggers`);
 
                 return toolResult({
@@ -234,9 +242,10 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
         title: 'Describe Trigger',
         description: 'Gets detailed information about a specific trigger, including its source code, type, sequence, and status',
         inputSchema: z.object({
-            triggerName: z.string().describe('Name of the trigger to describe')
+            triggerName: z.string().describe('Name of the trigger to describe'),
+            database: databaseArg
         }),
-        handler: async (args: { triggerName: string }) => {
+        handler: async (args: { triggerName: string; database?: string }) => {
             const { triggerName } = args;
             logger.info(`Describing trigger: ${triggerName}`);
 
@@ -244,7 +253,7 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const trigger = await describeTrigger(triggerName);
+                const trigger = await describeTrigger(triggerName, registry.resolve(args.database));
                 logger.info(`Retrieved trigger details for: ${triggerName}`);
 
                 return toolResult(trigger, { prefix: `Details for trigger '${triggerName}':\n\n` });
@@ -261,15 +270,15 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
     tools.set('list-procedures', {
         title: 'List Stored Procedures',
         description: 'Lists all stored procedures in the database with input and output parameter information',
-        inputSchema: z.object({}),
-        handler: async () => {
+        inputSchema: z.object({ database: databaseArg }),
+        handler: async (args: { database?: string }) => {
             logger.info('Listing stored procedures');
 
             try {
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const procedures = await listProcedures();
+                const procedures = await listProcedures(registry.resolve(args.database));
                 logger.info(`Retrieved ${procedures.length} procedures`);
 
                 return toolResult({
@@ -290,9 +299,10 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
         title: 'Describe Stored Procedure',
         description: 'Gets detailed information about a specific stored procedure, including its source code and parameters',
         inputSchema: z.object({
-            procedureName: z.string().describe('Name of the stored procedure to describe')
+            procedureName: z.string().describe('Name of the stored procedure to describe'),
+            database: databaseArg
         }),
-        handler: async (args: { procedureName: string }) => {
+        handler: async (args: { procedureName: string; database?: string }) => {
             const { procedureName } = args;
             logger.info(`Describing procedure: ${procedureName}`);
 
@@ -300,7 +310,7 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const procedure = await describeProcedure(procedureName);
+                const procedure = await describeProcedure(procedureName, registry.resolve(args.database));
                 logger.info(`Retrieved procedure details for: ${procedureName}`);
 
                 return toolResult(procedure, { prefix: `Details for procedure '${procedureName}':\n\n` });
@@ -317,15 +327,15 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
     tools.set('list-functions', {
         title: 'List Functions',
         description: 'Lists all functions in the database (UDFs and PSQL functions)',
-        inputSchema: z.object({}),
-        handler: async () => {
+        inputSchema: z.object({ database: databaseArg }),
+        handler: async (args: { database?: string }) => {
             logger.info('Listing functions');
 
             try {
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const functions = await listFunctions();
+                const functions = await listFunctions(registry.resolve(args.database));
                 logger.info(`Retrieved ${functions.length} functions`);
 
                 return toolResult({
@@ -346,9 +356,10 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
         title: 'Describe Function',
         description: 'Gets detailed information about a specific function, including its source code (for PSQL functions)',
         inputSchema: z.object({
-            functionName: z.string().describe('Name of the function to describe')
+            functionName: z.string().describe('Name of the function to describe'),
+            database: databaseArg
         }),
-        handler: async (args: { functionName: string }) => {
+        handler: async (args: { functionName: string; database?: string }) => {
             const { functionName } = args;
             logger.info(`Describing function: ${functionName}`);
 
@@ -356,7 +367,7 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const func = await describeFunction(functionName);
+                const func = await describeFunction(functionName, registry.resolve(args.database));
                 logger.info(`Retrieved function details for: ${functionName}`);
 
                 return toolResult(func, { prefix: `Details for function '${functionName}':\n\n` });
@@ -373,15 +384,15 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
     tools.set('list-packages', {
         title: 'List Packages',
         description: 'Lists all packages in the database (available in Firebird 3.0+)',
-        inputSchema: z.object({}),
-        handler: async () => {
+        inputSchema: z.object({ database: databaseArg }),
+        handler: async (args: { database?: string }) => {
             logger.info('Listing packages');
 
             try {
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const packages = await listPackages();
+                const packages = await listPackages(registry.resolve(args.database));
                 logger.info(`Retrieved ${packages.length} packages`);
 
                 return toolResult({
@@ -402,9 +413,10 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
         title: 'Describe Package',
         description: 'Gets detailed information about a specific package, including its header and body source',
         inputSchema: z.object({
-            packageName: z.string().describe('Name of the package to describe')
+            packageName: z.string().describe('Name of the package to describe'),
+            database: databaseArg
         }),
-        handler: async (args: { packageName: string }) => {
+        handler: async (args: { packageName: string; database?: string }) => {
             const { packageName } = args;
             logger.info(`Describing package: ${packageName}`);
 
@@ -412,7 +424,7 @@ export function setupMetadataTools(databaseTools: Map<string, ToolDefinition>, c
                 // Check if EXECUTE operation is allowed
                 checkAllowedOperation('EXECUTE');
 
-                const pkg = await describePackage(packageName);
+                const pkg = await describePackage(packageName, registry.resolve(args.database));
                 logger.info(`Retrieved package details for: ${packageName}`);
 
                 return toolResult(pkg, { prefix: `Details for package '${packageName}':\n\n` });

@@ -1,13 +1,14 @@
 jest.mock('../../db/connection.js', () => ({
-    DEFAULT_CONFIG: {}, getGlobalConfig: jest.fn(), connectToDatabase: jest.fn(), queryDatabase: jest.fn(),
+    DEFAULT_CONFIG: {}, getGlobalConfig: jest.fn(), getDefaultConfig: jest.fn(() => ({ database: 'default-db' })), connectToDatabase: jest.fn(), queryDatabase: jest.fn(),
     getPool: jest.fn(() => ({ release: releaseMock, destroy: destroyMock }))
 }));
 jest.mock('../../security/audit.js', () => ({ logQueryExecution: jest.fn().mockResolvedValue(undefined) }));
 const releaseMock = jest.fn();
 const destroyMock = jest.fn();
-import { connectToDatabase, queryDatabase } from '../../db/connection.js';
+import { connectToDatabase, queryDatabase, getGlobalConfig, getDefaultConfig, getPool } from '../../db/connection.js';
 import { executeQuery, executeMetadataQuery, executeBatchQueries, listTables } from '../../db/queries.js';
 import { logQueryExecution } from '../../security/audit.js';
+import { DatabaseRegistry } from '../../db/database-registry.js';
 import { DEFAULT_SECURITY_CONFIG, securityConfig } from '../../security/config.js';
 import { resetQueryCount, resetRateLimit } from '../../security/resourceLimits.js';
 
@@ -82,7 +83,7 @@ describe('real query boundary with mocked Firebird I/O', () => {
         jest.mocked(queryDatabase).mockResolvedValue([{ OTHER: '123' }]);
         await expect(executeQuery('SELECT SSN AS OTHER FROM T WHERE ID = ?', [7])).resolves.toEqual([{ OTHER: 'hidden' }]);
         expect(queryDatabase).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('WHERE (VISIBLE = 1)'), [7], expect.any(Function));
-        expect(logQueryExecution).toHaveBeenLastCalledWith(expect.any(String), [7], '', '', true, '', expect.any(Number), 1, [{OTHER:'hidden'}]);
+        expect(logQueryExecution).toHaveBeenLastCalledWith(expect.any(String), [7], '', '', true, '', expect.any(Number), 1, [{OTHER:'hidden'}], { alias: 'default', path: 'default-db' });
     });
     it('does not release oversized results and enforces policy in batch queries', async () => {
         securityConfig.maxRows = 1;
@@ -176,5 +177,57 @@ describe('real query boundary with mocked Firebird I/O', () => {
             complete([{ID:1}]);
             await expect(pending).resolves.toEqual([{ID:1}]);
         } finally { jest.useRealTimers(); }
+    });
+    describe('database selection by config', () => {
+        const defaultConfig = { host: '127.0.0.1', port: 3050, user: 'SYSDBA', password: 'x', database: '/dados/padrao.fdb' };
+        const other = { ...defaultConfig, database: '/dados/outro.fdb' };
+        beforeEach(() => {
+            jest.mocked(getDefaultConfig).mockReturnValue(defaultConfig);
+            jest.mocked(getGlobalConfig).mockReturnValue(defaultConfig);
+            (global as any).MCP_FIREBIRD_CONFIG = defaultConfig;
+        });
+        afterEach(() => { delete (global as any).MCP_FIREBIRD_CONFIG; });
+
+        it('sends an explicit config to the driver even when MCP_FIREBIRD_CONFIG is set', async () => {
+            await executeQuery('SELECT 1 FROM T', [], other);
+            expect(connectToDatabase).toHaveBeenCalledWith(other);
+            expect(getPool).toHaveBeenCalledWith(other);
+            expect(getPool).not.toHaveBeenCalledWith(defaultConfig);
+        });
+        it('uses the configured default only when no config is passed', async () => {
+            await executeQuery('SELECT 1 FROM T');
+            expect(connectToDatabase).toHaveBeenCalledWith(defaultConfig);
+            expect(getPool).toHaveBeenCalledWith(defaultConfig);
+        });
+        it('tells the audit which database each query ran on', async () => {
+            const registry = new DatabaseRegistry(() => defaultConfig);
+            const prepared = registry.prepare('/dados/clientes/erp.fdb');
+            if ('existing' in prepared) throw new Error('unexpected');
+            const erp = registry.commit(prepared).config;
+            await executeQuery('SELECT 1 FROM T', [], erp);
+            const onErp = jest.mocked(logQueryExecution).mock.calls.map(call => call[9]);
+            expect(onErp).toHaveLength(2);
+            for (const target of onErp) expect(target).toEqual({ alias: 'erp', path: '/dados/clientes/erp.fdb' });
+
+            jest.mocked(logQueryExecution).mockClear();
+            await executeQuery('SELECT 1 FROM T');
+            for (const call of jest.mocked(logQueryExecution).mock.calls) expect(call[9]).toEqual({ alias: 'default', path: '/dados/padrao.fdb' });
+        });
+        it('tells the audit which database a failed query ran on', async () => {
+            const registry = new DatabaseRegistry(() => defaultConfig);
+            const prepared = registry.prepare('/dados/clientes/erp.fdb');
+            if ('existing' in prepared) throw new Error('unexpected');
+            const erp = registry.commit(prepared).config;
+            jest.mocked(queryDatabase).mockRejectedValue(new Error('boom'));
+            await expect(executeQuery('SELECT 1 FROM T', [], erp)).rejects.toThrow();
+            expect(jest.mocked(logQueryExecution).mock.calls.at(-1)![9]).toEqual({ alias: 'erp', path: '/dados/clientes/erp.fdb' });
+        });
+        it('keeps the explicit config for internal metadata queries and for listTables', async () => {
+            jest.mocked(queryDatabase).mockResolvedValue([{ RDB$RELATION_NAME: 'T ' }]);
+            await executeMetadataQuery('SELECT 1 FROM T', [], other);
+            await listTables(other);
+            expect(connectToDatabase).toHaveBeenCalledTimes(2);
+            for (const call of jest.mocked(connectToDatabase).mock.calls) expect(call[0]).toBe(other);
+        });
     });
 });

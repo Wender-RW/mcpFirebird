@@ -2,6 +2,11 @@ import { z } from 'zod';
 import { checkResponseSizeLimit } from '../security/resourceLimits.js';
 import { wrapError } from '../utils/jsonHelper.js';
 
+/** Optional `database` argument shared by every tool that queries a database. */
+export const databaseArg = z.string().optional().describe(
+    'Alias of the database to use. Omit it, or use "default", for the database configured at startup.'
+);
+
 export interface ToolResult extends Record<string, unknown> {
     content: { type: 'text'; text: string }[];
     structuredContent: {
@@ -111,7 +116,8 @@ export function toolError(error: unknown, options: { text?: string; compact?: bo
 export function finalizeTools(
     drafts: Map<string, ToolDraft>,
     resultSchemas: Record<string, z.ZodType>,
-    executionTools: ReadonlySet<string> = new Set()
+    executionTools: ReadonlySet<string> = new Set(),
+    annotationOverrides: Readonly<Record<string, ToolAnnotations>> = {}
 ): Map<string, ToolDefinition> {
     const tools = new Map<string, ToolDefinition>();
     for (const [name, draft] of drafts) {
@@ -122,7 +128,7 @@ export function finalizeTools(
             ...draft,
             name,
             outputSchema,
-            annotations: { ...(executionTools.has(name) ? sqlExecutionAnnotations : readOnlyAnnotations) },
+            annotations: { ...(annotationOverrides[name] ?? (executionTools.has(name) ? sqlExecutionAnnotations : readOnlyAnnotations)) },
             handler: async args => {
                 try {
                     const result = await draft.handler(args);

@@ -78,6 +78,10 @@ for (const [name, args] of cases) {
         assert.equal(tool.outputSchema.safeParse(response.structuredContent).success, true);
         // No silently stripped fields in the SDK's subsequent Zod parse.
         assert.deepEqual(tool.outputSchema.parse(response.structuredContent), response.structuredContent);
+        if (name === 'get-database-info') {
+            assert.equal(response.structuredContent.result.database, 'default');
+            assert.equal(response.structuredContent.result.path, 'mock-contract-only');
+        }
         if (name === 'list-tables' || name === 'get-database-info') {
             assert.deepEqual(response.structuredContent.result.tables, ['CUSTOMERS', 'ORDERS']);
             assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent.result);
@@ -91,6 +95,21 @@ for (const [name, args] of cases) {
         }
     });
 }
+
+test('database tools accept the default alias and reject an unknown one with the valid aliases', async () => {
+    for (const [name, args] of cases) {
+        const properties = z.toJSONSchema(tools.get(name).inputSchema).properties || {};
+        if (!('database' in properties)) continue;
+        const baseline = await tools.get(name).handler(args);
+        const known = await tools.get(name).handler({ ...args, database: 'default' });
+        assert.equal(known.isError, baseline.isError, `${name} with database=default behaves as without it`);
+        assert.equal(known.structuredContent.success, baseline.structuredContent.success, name);
+        const unknown = await tools.get(name).handler({ ...args, database: 'inexistente' });
+        assert.equal(unknown.isError, true, `${name} with an unknown alias`);
+        assert.equal(unknown.structuredContent.error.type, 'UNKNOWN_DATABASE_ALIAS', name);
+        assert.match(unknown.structuredContent.error.message, /Valid aliases: default$/, name);
+    }
+});
 
 test('all tool schemas explicitly describe JSON values instead of empty schemas', () => {
     for (const [name, tool] of tools) assertConcreteSchema(z.toJSONSchema(tool.outputSchema), name);

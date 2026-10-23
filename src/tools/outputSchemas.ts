@@ -113,7 +113,7 @@ export const databaseResultSchemas: Record<string, z.ZodType> = {
         hasNativeDriver: z.boolean(), wireEncryptionEnabled: z.boolean(),
         driverType: z.enum(['native', 'pure-js']), recommendation: z.string()
     }),
-    'get-database-info': z.object({ totalTables: z.number(), tables: Tables })
+    'get-database-info': z.object({ database: z.string(), path: z.string(), totalTables: z.number(), tables: Tables })
 };
 
 export const metadataResultSchemas: Record<string, z.ZodType> = {
@@ -142,4 +142,16 @@ export const metadataResultSchemas: Record<string, z.ZodType> = {
     'describe-function': FunctionInfo,
     'list-packages': z.object({ totalPackages: z.number(), packages: z.array(Package) }),
     'describe-package': Package
+};
+
+export const connectionResultSchemas: Record<string, z.ZodType> = {
+    'connect-database': z.object({
+        alias: z.string().describe('Alias to pass as the `database` argument of the other tools'),
+        path: z.string().describe('Normalized database path'),
+        alreadyConnected: z.boolean().describe('True when this path was already connected under that alias')
+    }),
+    'list-databases': z.object({
+        databases: z.array(z.object({ alias: z.string(), path: z.string() }))
+    }),
+    'disconnect-database': z.object({ alias: z.string(), path: z.string() })
 };

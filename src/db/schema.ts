@@ -1,7 +1,7 @@
 // Esquema de tablas
 import { createLogger } from '../utils/logger.js';
 import { validateSql } from '../utils/security.js';
-import { DEFAULT_CONFIG } from './connection.js';
+import type { ConfigOptions } from './connection.js';
 import { FirebirdError } from '../utils/errors.js';
 import { executeMetadataQuery as executeQuery } from './queries.js';
 import { checkAllowedTable } from '../security/authorization.js';
@@ -14,7 +14,7 @@ const logger = createLogger('db:schema');
  * @param {object} config - Configuración de conexión a la base de datos (opcional)
  * @returns {object} Esquema de tabla que incluye columnas, claves primarias y claves foráneas
  */
-export const getTableSchema = async (tableName: string, config = DEFAULT_CONFIG) => {
+export const getTableSchema = async (tableName: string, config?: ConfigOptions) => {
     checkAllowedTable(tableName);
     try {
         if (!validateSql(tableName)) {

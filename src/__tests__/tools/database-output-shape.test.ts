@@ -10,7 +10,8 @@ jest.mock('../../db/index.js', () => ({
     describeBatchTables: jest.fn(),
     getTableIndexes: jest.fn(),
     getTableConstraints: jest.fn(),
-    getTableTriggers: jest.fn()
+    getTableTriggers: jest.fn(),
+    getDefaultConfig: jest.fn(() => ({ database: '/dados/padrao.fdb' }))
 }));
 
 import {
@@ -65,7 +66,8 @@ describe('database tool output shape', () => {
 
         expect(mockedExecuteQuery).toHaveBeenCalledWith(
             'SELECT FIRST 10 * FROM "CUSTOMERS" WHERE "NAME" = ? ORDER BY "ID" DESC',
-            ["O'Reilly"]
+            ["O'Reilly"],
+            undefined
         );
     });
 
@@ -99,7 +101,7 @@ describe('database tool output shape', () => {
 
         const response = await setupDatabaseTools().get(toolName)!.handler({ tableName: 'CUSTOMERS' });
 
-        expect(operation).toHaveBeenCalledWith('CUSTOMERS');
+        expect(operation).toHaveBeenCalledWith('CUSTOMERS', undefined);
         expect(JSON.parse(response.content[0].text)).toEqual(result);
     });
 });

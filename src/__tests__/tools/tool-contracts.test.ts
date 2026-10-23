@@ -3,7 +3,8 @@ jest.mock('../../db/index.js', () => ({
     getFieldDescriptions: jest.fn(), analyzeQueryPerformance: jest.fn(),
     getExecutionPlan: jest.fn(), analyzeMissingIndexes: jest.fn(),
     executeBatchQueries: jest.fn(), describeBatchTables: jest.fn(),
-    getTableIndexes: jest.fn(), getTableConstraints: jest.fn(), getTableTriggers: jest.fn()
+    getTableIndexes: jest.fn(), getTableConstraints: jest.fn(), getTableTriggers: jest.fn(),
+    getDefaultConfig: jest.fn(() => ({ database: '/dados/padrao.fdb' }))
 }));
 
 import { z } from 'zod';
@@ -28,6 +29,7 @@ describe('MCP tool contracts', () => {
     const savedEnv = { ...process.env };
     beforeEach(() => {
         jest.resetAllMocks();
+        jest.mocked(db.getDefaultConfig).mockReturnValue({ database: '/dados/padrao.fdb' } as any);
         delete process.env.ALLOW_RAW_SQL;
         for (const key of Object.keys(securityConfig)) delete (securityConfig as any)[key];
         Object.assign(securityConfig, structuredClone(DEFAULT_SECURITY_CONFIG));
@@ -41,6 +43,18 @@ describe('MCP tool contracts', () => {
             expect(schema.properties).toHaveProperty('success');
             expect(schema.properties).toHaveProperty('result');
             expect(schema.properties).toHaveProperty('error');
+        }
+    });
+
+    it('advertises `database` as an optional string on every tool that queries a database', () => {
+        for (const [name, tool] of setupDatabaseTools()) {
+            const schema = z.toJSONSchema(tool.inputSchema) as { properties?: Record<string, any>; required?: string[] };
+            if (name === 'verify-wire-encryption') {
+                expect(schema.properties || {}).not.toHaveProperty('database');
+            } else {
+                expect(schema.properties?.database?.type).toBe('string');
+                expect(schema.required || []).not.toContain('database');
+            }
         }
     });
 
@@ -65,7 +79,7 @@ describe('MCP tool contracts', () => {
             const response = await tool.handler({});
             expect(response.isError).not.toBe(true);
             expect(response.structuredContent.result).toEqual(name === 'list-tables'
-                ? { tables } : { tables, totalTables: tables.length });
+                ? { tables } : { database: 'default', path: '/dados/padrao.fdb', tables, totalTables: tables.length });
             expect(JSON.parse(response.content[0].text)).toEqual(response.structuredContent.result);
             expect(tool.outputSchema.safeParse({ success: true, result: { tables: [{ name: 'CUSTOMERS', uri: 'firebird://CUSTOMERS' }], totalTables: 1 } }).success).toBe(false);
         }

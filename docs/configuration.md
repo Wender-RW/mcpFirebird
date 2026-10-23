@@ -15,9 +15,6 @@ export FIREBIRD_USER=SYSDBA
 export FIREBIRD_PASSWORD=masterkey
 export FIREBIRD_ROLE=undefined  # Optional
 
-# Directory configuration (alternative)
-export FIREBIRD_DATABASE_DIR=/path/to/databases  # Directory with databases
-
 # Enterprise Managed Authorization (EMA)
 export FIREBIRD_API_KEY=my_secret_token_123
 
@@ -44,6 +41,56 @@ FIREBIRD_API_KEY=my_secret_token_123
 TRANSPORT_TYPE=sse  # Recommended: sse (HTTP Streamable). Legacy: stdio
 SSE_PORT=3003
 ```
+
+## Connecting More Than One Database
+
+With the `stdio` transport, the model can open other databases on the same Firebird server during the conversation. No restart or second server entry is needed.
+
+Three tools manage the connections:
+
+- `connect-database` takes `path` and an optional `alias`. It opens the database, tests the connection and returns the alias to use.
+- `list-databases` returns the default database and the connected ones, each with its alias and path.
+- `disconnect-database` takes `alias`, closes the connections of that database and removes the alias.
+
+Every tool that queries a database also accepts an optional `database` argument with an alias. Without it, or with `default`, the tool uses the database configured at startup, as before.
+
+```json
+{ "path": "D:\\clients\\c42\\erp.fdb" }
+```
+
+`connect-database` answers with the alias, here `erp`:
+
+```json
+{ "alias": "erp", "path": "D:\\clients\\c42\\erp.fdb", "alreadyConnected": false }
+```
+
+Later calls name the database:
+
+```json
+{ "tableName": "CUSTOMERS", "database": "erp" }
+```
+
+Rules for the path and the alias:
+
+- The path must be absolute: a drive letter followed by a separator (`D:\data\app.fdb` or `D:/data/app.fdb`), or a path that starts with `/`.
+- Host, port, user, password, role and wire encryption always come from the server configuration. `connect-database` refuses any other field.
+- A path that would change the server is refused before any connection: a host prefix (`srv:/data/app.fdb`), a UNC path (`\\srv\share`), a protocol (`inet://srv/app.fdb`), a relative path and an alias of `databases.conf`.
+- Without `alias`, the alias is the file name without extension, in lowercase, with every character outside `a-z`, `0-9`, `_` and `-` replaced by `_`. If the alias exists, `-2`, `-3` and so on are appended.
+- An informed `alias` uses only `a-z`, `0-9`, `_` and `-`, up to 63 characters. `default` is reserved, and an alias already used by another path is an error.
+- Connecting a path that is already connected, even written differently (`d:/data/app.fdb` and `D:\data\app.fdb`), returns the existing alias.
+
+What stays on the default database: the resources (`firebird://...`), the prompts, the events (`POST_EVENT`) and the audit table. Connected databases follow the same security policy as the default one: allowed tables and operations, data masking, resource limits and audit.
+
+With `http`, `sse` and `unified`, the three connection tools are not registered, and `database` accepts only `default`.
+
+### Risks
+
+The model can connect to any database that the server credential can open on that Firebird server, including `security4.fdb` and databases of other applications. Reduce the exposure before enabling this in a shared server:
+
+- Set `DatabaseAccess = Restrict <folder list>` in `firebird.conf`, so the Firebird server only opens files in those folders.
+- Run the MCP server with a Firebird user that does not have the `SYSDBA` role.
+- Keep tool approval enabled in the client for `connect-database`. Text returned by a query can try to make the model connect another database.
+- The security policy was written for the default database. Table names differ in other databases, so check `allowedTables` and `rowFilters` before connecting them.
 
 ## Using with npx
 
